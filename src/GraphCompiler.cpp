@@ -1,0 +1,236 @@
+#include "NoxAudio/GraphCompiler.h"
+
+#include <algorithm>
+#include <functional>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "AudioLogInternal.h"
+
+namespace NoxAudio
+{
+    namespace
+    {
+        struct PendingLink
+        {
+            uint32_t ToPinIndex = 0;
+            uint32_t FromNodeIndex = 0;
+            uint32_t FromPinIndex = 0;
+        };
+
+        NodeGraph WithoutReroutes(const NodeGraph& graph)
+        {
+            std::unordered_map<uint32_t, const GraphLink*> feed;
+            std::unordered_set<uint32_t> reroutes;
+            for (const GraphNode& node : graph.Nodes)
+                if (node.TypeName == kRerouteNodeType)
+                    reroutes.insert(node.Id);
+            for (const GraphLink& link : graph.Links)
+                if (reroutes.contains(link.ToNode))
+                    feed[link.ToNode] = &link;
+            NodeGraph flat = graph;
+            flat.Nodes.clear();
+            flat.Links.clear();
+            for (const GraphNode& node : graph.Nodes)
+                if (!reroutes.contains(node.Id))
+                    flat.Nodes.push_back(node);
+            for (const GraphLink& link : graph.Links)
+            {
+                if (reroutes.contains(link.ToNode))
+                    continue;
+                GraphLink resolved = link;
+                bool fed = true;
+                for (size_t guard = 0; reroutes.contains(resolved.FromNode) && guard <= reroutes.size(); ++guard)
+                {
+                    const auto source = feed.find(resolved.FromNode);
+                    if (source == feed.end())
+                    {
+                        fed = false;
+                        break;
+                    }
+                    resolved.FromNode = source->second->FromNode;
+                    resolved.FromPin = source->second->FromPin;
+                }
+                if (fed && !reroutes.contains(resolved.FromNode))
+                    flat.Links.push_back(resolved);
+            }
+            return flat;
+        }
+    }
+
+    CompiledGraph GraphCompiler::Compile(const NodeGraph& graph)
+    {
+        if (std::any_of(graph.Nodes.begin(), graph.Nodes.end(), [](const GraphNode& node) { return node.TypeName == kRerouteNodeType; }))
+            return Compile(WithoutReroutes(graph));
+        CompiledGraph result;
+
+        if (graph.Nodes.empty())
+        {
+            NOXAUDIO_WARN("GraphCompiler::Compile - graph '{}' has no nodes", graph.Domain);
+            return result;
+        }
+
+        std::unordered_map<uint32_t, uint32_t> idToIndex;
+        std::vector<const NodeTypeDesc*> types(graph.Nodes.size(), nullptr);
+        idToIndex.reserve(graph.Nodes.size());
+        for (uint32_t i = 0; i < static_cast<uint32_t>(graph.Nodes.size()); i++)
+        {
+            const GraphNode& node = graph.Nodes[i];
+            if (idToIndex.count(node.Id))
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - duplicate node id {} in graph '{}'", node.Id, graph.Domain);
+                return CompiledGraph{};
+            }
+            idToIndex[node.Id] = i;
+
+            const NodeTypeDesc* type = NodeTypeRegistry::Find(graph.Domain, node.TypeName);
+            if (!type)
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - unknown node type '{}' for domain '{}'", node.TypeName, graph.Domain);
+                return CompiledGraph{};
+            }
+            types[i] = type;
+        }
+
+        std::vector<std::vector<PendingLink>> incomingByNode(graph.Nodes.size());
+        std::vector<std::unordered_set<uint32_t>> dependsOn(graph.Nodes.size());
+
+        for (const GraphLink& link : graph.Links)
+        {
+            auto fromIt = idToIndex.find(link.FromNode);
+            auto toIt = idToIndex.find(link.ToNode);
+            if (fromIt == idToIndex.end() || toIt == idToIndex.end())
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - link references a missing node in graph '{}'", graph.Domain);
+                return CompiledGraph{};
+            }
+
+            uint32_t fromIndex = fromIt->second;
+            uint32_t toIndex = toIt->second;
+            const NodeTypeDesc& fromType = *types[fromIndex];
+            const NodeTypeDesc& toType = *types[toIndex];
+
+            const NodePinList fromPins = ResolveNodePins(fromType, graph.Nodes[fromIndex].Properties);
+            const NodePinList toPins = ResolveNodePins(toType, graph.Nodes[toIndex].Properties);
+            if (link.FromPin >= fromPins.Outputs.size() || link.ToPin >= toPins.Inputs.size())
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - link pin index out of range in graph '{}'", graph.Domain);
+                return CompiledGraph{};
+            }
+            const NodePinDesc& fromPin = fromPins.Outputs[link.FromPin];
+            const NodePinDesc& toPin = toPins.Inputs[link.ToPin];
+            if (fromPin.Type != toPin.Type)
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - pin type mismatch linking {}.{} ({}) to {}.{} ({})",
+                               fromType.TypeName, fromPin.Name, fromPin.Type, toType.TypeName, toPin.Name, toPin.Type);
+                return CompiledGraph{};
+            }
+
+            incomingByNode[toIndex].push_back({ link.ToPin, fromIndex, link.FromPin });
+            dependsOn[toIndex].insert(fromIndex);
+        }
+
+        std::vector<uint32_t> remainingDeps(graph.Nodes.size());
+        std::vector<std::vector<uint32_t>> dependents(graph.Nodes.size());
+        for (uint32_t i = 0; i < static_cast<uint32_t>(graph.Nodes.size()); i++)
+        {
+            remainingDeps[i] = static_cast<uint32_t>(dependsOn[i].size());
+            for (uint32_t dep : dependsOn[i])
+                dependents[dep].push_back(i);
+        }
+
+        std::priority_queue<uint32_t, std::vector<uint32_t>, std::greater<uint32_t>> ready;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(graph.Nodes.size()); i++)
+            if (remainingDeps[i] == 0)
+                ready.push(i);
+
+        std::vector<uint32_t> order;
+        order.reserve(graph.Nodes.size());
+        while (!ready.empty())
+        {
+            uint32_t index = ready.top();
+            ready.pop();
+            order.push_back(index);
+            for (uint32_t dependent : dependents[index])
+            {
+                if (--remainingDeps[dependent] == 0)
+                    ready.push(dependent);
+            }
+        }
+
+        if (order.size() != graph.Nodes.size())
+        {
+            NOXAUDIO_ERROR("GraphCompiler::Compile - graph '{}' has a cycle", graph.Domain);
+            return CompiledGraph{};
+        }
+
+        std::vector<uint32_t> compiledIndexOf(graph.Nodes.size());
+        result.Nodes.resize(graph.Nodes.size());
+        uint32_t nextOutputSlot = 0;
+        for (uint32_t compiledIndex = 0; compiledIndex < static_cast<uint32_t>(order.size()); compiledIndex++)
+        {
+            uint32_t sourceIndex = order[compiledIndex];
+            compiledIndexOf[sourceIndex] = compiledIndex;
+
+            CompiledNode& compiled = result.Nodes[compiledIndex];
+            compiled.Type = types[sourceIndex];
+            compiled.SourceNodeId = graph.Nodes[sourceIndex].Id;
+            compiled.Properties = graph.Nodes[sourceIndex].Properties;
+            compiled.Transitions = graph.Nodes[sourceIndex].Transitions;
+            for (const NodeSubGraph& subGraph : graph.Nodes[sourceIndex].SubGraphs)
+            {
+                CompiledSubGraph compiledSub{ subGraph.Id, subGraph.Name, Compile(subGraph.Graph) };
+                if (!compiledSub.Graph.IsValid())
+                {
+                    NOXAUDIO_ERROR("GraphCompiler::Compile - sub graph '{}' of node {} in graph '{}' does not compile",
+                                   subGraph.Name, graph.Nodes[sourceIndex].Id, graph.Domain);
+                    return CompiledGraph{};
+                }
+                compiled.SubGraphs.push_back(std::move(compiledSub));
+            }
+            const NodePinList pins = ResolveNodePins(*compiled.Type, compiled.Properties);
+            compiled.Inputs.resize(pins.Inputs.size());
+            compiled.OutputSlotBase = nextOutputSlot;
+            nextOutputSlot += static_cast<uint32_t>(pins.Outputs.size());
+        }
+
+        for (uint32_t toIndex = 0; toIndex < static_cast<uint32_t>(graph.Nodes.size()); toIndex++)
+        {
+            CompiledNode& toCompiled = result.Nodes[compiledIndexOf[toIndex]];
+            for (const PendingLink& link : incomingByNode[toIndex])
+                toCompiled.Inputs[link.ToPinIndex] = { compiledIndexOf[link.FromNodeIndex], link.FromPinIndex };
+        }
+
+        result.TotalOutputSlots = nextOutputSlot;
+        result.Parameters = graph.Parameters;
+
+        auto outputIt = idToIndex.find(graph.OutputNode);
+        if (outputIt == idToIndex.end())
+        {
+            uint32_t sinkCount = 0;
+            uint32_t sinkNodeId = kInvalidGraphIndex;
+            for (uint32_t i = 0; i < static_cast<uint32_t>(graph.Nodes.size()); i++)
+            {
+                if (types[i]->Outputs.empty())
+                {
+                    sinkCount++;
+                    sinkNodeId = graph.Nodes[i].Id;
+                }
+            }
+
+            if (sinkCount == 1)
+                outputIt = idToIndex.find(sinkNodeId);
+
+            if (outputIt == idToIndex.end())
+            {
+                NOXAUDIO_ERROR("GraphCompiler::Compile - graph '{}' has no valid OutputNode ({} candidate sink node(s) found)",
+                               graph.Domain, sinkCount);
+                return CompiledGraph{};
+            }
+        }
+        result.OutputNodeIndex = compiledIndexOf[outputIt->second];
+
+        return result;
+    }
+}

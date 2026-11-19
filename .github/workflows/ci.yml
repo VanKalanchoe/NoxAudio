@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows x64 (${{ matrix.config }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [ Debug, Release ]
+
+    steps:
+      - name: Checkout NoxAudio
+        uses: actions/checkout@v4
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-cache
+          key: noxaudio-vcpkg-${{ runner.os }}-x64-v1
+
+      - name: Install Dependencies (miniaudio, Steam Audio SDK, vcpkg packages)
+        shell: cmd
+        run: |
+          if not exist vendors mkdir vendors
+          git clone --depth 1 https://github.com/mackron/miniaudio.git vendors\miniaudio
+          curl -fSL https://github.com/ValveSoftware/steam-audio/releases/download/v4.8.1/steamaudio_4.8.1.zip -o "%TEMP%\steamaudio.zip"
+          tar -xf "%TEMP%\steamaudio.zip" -C vendors
+          del /q "%TEMP%\steamaudio.zip"
+          if not exist "%TEMP%\vcpkg-cache" mkdir "%TEMP%\vcpkg-cache"
+          set "VCPKG_BINARY_SOURCES=clear;files,%TEMP%\vcpkg-cache,readwrite"
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg.exe" install glm yaml-cpp --triplet=x64-windows
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          $toolchain = "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build -A x64 `
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
+            -DNOXAUDIO_BUILD_TESTS=ON
+
+      - name: Build (${{ matrix.config }})
+        shell: pwsh
+        run: |
+          cmake --build build --config ${{ matrix.config }} --parallel
+
+      - name: Run NoxAudioTest
+        shell: pwsh
+        run: |
+          ./build/${{ matrix.config }}/NoxAudioTest.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
