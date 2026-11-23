@@ -19,7 +19,3 @@ namespace NoxAudio
     void LogMessage(LogLevel level, std::string_view message);
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

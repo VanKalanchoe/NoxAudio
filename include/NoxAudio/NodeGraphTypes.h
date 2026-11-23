@@ -84,7 +84,3 @@ namespace NoxAudio
     template<> inline constexpr bool kIsNodeGraphValueType<glm::vec4> = true;
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

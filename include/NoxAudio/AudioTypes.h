@@ -122,7 +122,3 @@ namespace NoxAudio
     using AudioVoiceHandle = uint64_t;
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

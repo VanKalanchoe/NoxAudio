@@ -32,7 +32,3 @@ namespace NoxAudio
     };
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

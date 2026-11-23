@@ -60,7 +60,3 @@ namespace NoxAudio
     Ref<AcousticData> LoadAcousticData(const std::filesystem::path& path);
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

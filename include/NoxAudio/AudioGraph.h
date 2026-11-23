@@ -252,7 +252,3 @@ namespace NoxAudio
     NodeGraph CreateEmptyAudioGraph();
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

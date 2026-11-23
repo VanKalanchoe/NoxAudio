@@ -83,7 +83,3 @@ namespace NoxAudio
     void EvaluateGraph(GraphEvalContext& ctx, const CompiledGraph& graph);
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

@@ -249,7 +249,3 @@ namespace NoxAudio::AudioDSP
     };
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

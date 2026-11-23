@@ -93,7 +93,3 @@ namespace NoxAudio
     std::unique_ptr<AudioEffect> CreateAudioEffect(AudioEffectType type, float sampleRate, const AudioClip* impulse = nullptr);
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}

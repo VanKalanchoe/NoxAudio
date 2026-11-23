@@ -131,7 +131,3 @@ namespace NoxAudio
     AcousticMaterial ResolveAcousticMaterial(AcousticMaterial chosen, float metallic, float transmission, bool blended);
 }
 
-namespace Nox
-{
-    using namespace NoxAudio;
-}
