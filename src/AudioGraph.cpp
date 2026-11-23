@@ -388,6 +388,8 @@ namespace NoxAudio
         {
             if (Ref<AudioClip> clip = AudioClipRegistry::Get(handle))
                 program->m_Clips[handle] = std::move(clip);
+            else
+                outMissing.push_back(handle);
         }
         if (!outMissing.empty())
         {
